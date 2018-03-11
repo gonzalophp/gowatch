@@ -1,0 +1,35 @@
+{
+  "Timeout": 300,
+  "Watch" : {
+    "my_project_1": {
+      "SourceDir": "/var/www/my_project_1",
+      "Exclude":
+      [
+        "/var/www/my_project_1/vendor",
+        "/var/www/my_project_1/.git"
+      ],
+      "Cmd": [
+        ["echo","Resource modified: {{EventName}}"],
+        ["ls","{{LS-Parameter}}","{{SourceDir}}"]
+      ],
+      "LS-Parameter": "-1R"
+    },
+    "my_project_2": {
+      "SourceDir": "/home/mydir/library1",
+      "Cmd": [
+        ["rsync","{{SourceDir}}","/var/www/library/library1"]
+      ]
+    },
+    "my_project_3": {
+      "SourceDir": "/home/mydir/library2",
+      "Exclude":
+      [
+        "/home/mydir/library2/vendor"
+      ],
+      "Cmd": [
+        ["rsync","{{EventName}}","{{Destination}}"]
+      ],
+      "Destination": "/var/www/library/library2"
+    }
+  }
+}
