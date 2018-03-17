@@ -64,6 +64,11 @@ func addToQueue(event fsnotify.Event) {
 
 	for i := range watchKeys {
 		watchK := watchKeys[i].String()
+
+		if !isActiveWatch(watchK) {
+			continue
+		}
+
 		if run.Queues[run.ListeningQueue][watchK] == nil {
 			run.Queues[run.ListeningQueue][watchK] = map[string]string{}
 		}
