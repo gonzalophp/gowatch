@@ -10,9 +10,11 @@
       ],
       "Cmd": [
         ["echo","Resource modified: {{EventName}}"],
-        ["ls","{{LS-Parameter}}","{{SourceDir}}"]
+        ["ls","{{Par1}}","{{Par2}}","{{Par3}}","{{SourceDir}}"]
       ],
-      "LS-Parameter": "-1R"
+      "Par1": "-l",
+      "Par2": "-a",
+      "Par3": "-r"
     },
     "my_project_2": {
       "SourceDir": "/home/mydir/library1",
@@ -27,7 +29,7 @@
         "/home/mydir/library2/vendor"
       ],
       "Cmd": [
-        ["rsync","{{EventName}}","{{Destination}}"]
+        ["rsync","{{SourceDir}}","{{Destination}}"]
       ],
       "Destination": "/var/www/library/library2"
     }

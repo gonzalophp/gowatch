@@ -35,9 +35,9 @@ gowatch -config=/path/gowatch.json -watch=my_project_4
 * **Cmd** [List ] Execute system commands.
   - **Cmd Format**:
   ``` 
-	 ["system command1","parameter1","parameter2",...],
-	 ["system command2","parameter1","parameter2",...],
-	 ["system command3","parameter1","parameter2",...]
+	 ["system_command1","parameter1","parameter2",...],
+	 ["system_command2","parameter1","parameter2",...],
+	 ["system_command3","parameter1","parameter2",...]
 	...
   ```
   - **Cmd Parameters**:
@@ -73,9 +73,11 @@ gowatch -config=/path/gowatch.json -watch=my_project_4
       ],
       "Cmd": [
         ["echo","Resource modified: {{EventName}}"],
-        ["ls","{{LS-Parameter}}","{{SourceDir}}"]
+        ["ls","{{Par1}}","{{Par2}}","{{Par3}}","{{SourceDir}}"]
       ],
-      "LS-Parameter": "-1R"
+      "Par1": "-l",
+      "Par2": "-a",
+      "Par3": "-r"
     },
     "my_project_2": {
       "SourceDir": "/home/mydir/library1",
@@ -90,7 +92,7 @@ gowatch -config=/path/gowatch.json -watch=my_project_4
         "/home/mydir/library2/vendor"
       ],
       "Cmd": [
-        ["rsync","{{EventName}}","{{Destination}}"]
+        ["rsync","{{SourceDir}}","{{Destination}}"]
       ],
       "Destination": "/var/www/library/library2"
     }
@@ -103,13 +105,13 @@ gowatch -config=/path/gowatch.json -watch=my_project_4
 * Download GoLang MSI installer from https://golang.org/dl/
 * Building gowatch.exe:
 ```
-go get "github.com/fsnotify/fsnotify"
 git clone git@github.com:gonzalophp/gowatch.git
 cd gowatch
+go get "github.com/fsnotify/fsnotify"
 go build gowatch.go
 ```
 
-Windows users might need to setup their cmd actions starting from **"cmd","/C"**
+Windows users might need to setup their Cmd actions starting from **"cmd","/C"**
 
 ```
     "Cmd": [

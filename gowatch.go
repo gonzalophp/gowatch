@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -17,11 +18,83 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// Cmd And Parameters
+type CmdItem []string
+
+// Watch settings
+type Watch struct {
+	SourceDir      string
+	Exclude        []string
+	Cmd            []CmdItem
+	UserParameters map[string]string
+}
+
+func (w Watch) getParameter(p string) string {
+	structValue := reflect.ValueOf(w).FieldByName(p)
+	if structValue.IsValid() {
+		return structValue.String()
+	}
+
+	if userValue, ok := w.UserParameters[p]; ok {
+		return userValue
+	}
+
+	return ""
+}
+
 // Config store values from JSON config file
 type Config struct {
-	Timeout int
-	Watch   map[string]interface{}
+	Timeout int64
+	Watch   map[string]Watch
 }
+
+func (c Config) getTimeOut() int64 {
+	return c.Timeout
+}
+
+func (c Config) getWatch(watchK string) Watch {
+	return c.Watch[watchK]
+}
+
+// New : Config initizalizer
+func (c Config) New(fileName string) Config {
+
+	raw, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		showErrorAndExit("Error: cannot open config file (%s)\n", fileName)
+	}
+	var configRaw map[string]interface{}
+	json.Unmarshal(raw, &configRaw)
+	json.Unmarshal(raw, &c)
+
+	if configRaw["Watch"] == nil {
+		showErrorAndExit("Error: cannot decode config file (%s)\n", fileName)
+	}
+	for watchK, watchData := range configRaw["Watch"].(map[string]interface{}) {
+		if len(c.getWatch(watchK).SourceDir) == 0 {
+			showErrorAndExit("Error: Watch(%v:%v) is empty\n", watchK, "SourceDir")
+		}
+
+		for k, v := range watchData.(map[string]interface{}) {
+			if !reflect.ValueOf(c.Watch[watchK]).FieldByName(k).IsValid() {
+				if c.Watch[watchK].UserParameters == nil {
+					w := c.Watch[watchK]
+					w.UserParameters = map[string]string{}
+					c.Watch[watchK] = w
+				}
+				c.Watch[watchK].UserParameters[k] = v.(string)
+			}
+		}
+	}
+
+	return c
+}
+
+// WatchQueue
+type WatchQueue map[string]string
+
+// BufferQueue
+type BufferQueue map[string]WatchQueue
 
 // Run store running values
 type Run struct {
@@ -30,7 +103,7 @@ type Run struct {
 	ListeningQueue string
 	ExecutingQueue string
 	InExecution    bool
-	Queues         map[string]map[string]map[string]string
+	Queues         map[string]BufferQueue
 	WatchingDirs   map[string][]string
 	LastEventTime  int64
 }
@@ -57,43 +130,32 @@ func inArray(array []string, value string) bool {
 }
 
 func addToQueue(event fsnotify.Event) {
-	now := time.Now().UnixNano()
-	run.LastEventTime = now
+	run.LastEventTime = time.Now().UnixNano()
 
-	watchKeys := reflect.ValueOf(config.Watch).MapKeys()
-
-	for i := range watchKeys {
-		watchK := watchKeys[i].String()
-
-		if !isActiveWatch(watchK) {
-			continue
-		}
-
+	for _, watchK := range run.ActiveWatchs {
 		if run.Queues[run.ListeningQueue][watchK] == nil {
 			run.Queues[run.ListeningQueue][watchK] = map[string]string{}
 		}
-		SourceDir := getJSONValue("SourceDir", config.Watch[watchK]).(string)
+		SourceDir := config.getWatch(watchK).SourceDir
 		if strings.HasPrefix(event.Name, SourceDir) {
 			if fileOp := run.Queues[run.ListeningQueue][watchK][event.Name]; fileOp == "" {
 				run.Queues[run.ListeningQueue][watchK][event.Name] = event.Op.String()
 			}
-			return
+			continue
 		}
 	}
-	log.Panicf("Path not found (%v)", watchKeys)
 }
 
 func removeFromWatchingDir(watchK string, path string) {
 	var newWatchingDirs []string
 
-	for i := range run.WatchingDirs[watchK] {
-		if run.WatchingDirs[watchK][i] == path ||
-			(len(run.WatchingDirs[watchK][i]) > len(path) &&
-				(run.WatchingDirs[watchK][i][:len(path)+1] == path+string(os.PathSeparator))) {
+	for _, watchedDir := range run.WatchingDirs[watchK] {
+		if watchedDir == path || (len(watchedDir) > len(path) &&
+			(watchedDir[:len(path)+1] == path+string(os.PathSeparator))) {
 
 			run.watcher.Remove(path)
 		} else {
-			newWatchingDirs = append(newWatchingDirs, run.WatchingDirs[watchK][i])
+			newWatchingDirs = append(newWatchingDirs, watchedDir)
 		}
 	}
 
@@ -103,7 +165,7 @@ func removeFromWatchingDir(watchK string, path string) {
 func addToWatchingDir(watchK string, path string, f os.FileInfo) error {
 
 	if f == nil {
-		err := fmt.Sprintf("Error: Cannot access to path %v", path)
+		err := fmt.Sprintf("Error: Cannot access to path %v\n", path)
 		return errors.New(err)
 	}
 	if run.WatchingDirs == nil {
@@ -114,22 +176,21 @@ func addToWatchingDir(watchK string, path string, f os.FileInfo) error {
 		run.WatchingDirs[watchK] = []string{}
 	}
 
-	exclude := getJSONValue("Exclude", config.Watch[watchK])
+	exclude := config.getWatch(watchK).Exclude
 	if exclude != nil {
-		excluding := exclude.([]interface{})
-		for i := range excluding {
+		for _, excludedDir := range exclude {
 
 			foundPath := path
 			if string(foundPath[len(foundPath)-1:]) != string(os.PathSeparator) {
 				foundPath = foundPath + string(os.PathSeparator)
 			}
-			configExcluding := excluding[i].(string)
-			if string(configExcluding[len(configExcluding)-1:]) != string(os.PathSeparator) {
-				configExcluding = configExcluding + string(os.PathSeparator)
+
+			if string(excludedDir[len(excludedDir)-1:]) != string(os.PathSeparator) {
+				excludedDir = excludedDir + string(os.PathSeparator)
 			}
 
-			if len(foundPath) >= len(configExcluding) {
-				if string(foundPath[0:len(configExcluding)]) == configExcluding {
+			if len(foundPath) >= len(excludedDir) {
+				if string(foundPath[0:len(excludedDir)]) == excludedDir {
 					return nil
 				}
 			}
@@ -153,16 +214,15 @@ func hasTimedOut() bool {
 }
 
 func isDataRunQueues() bool {
-	queueWatchKeys := reflect.ValueOf(run.Queues[run.ListeningQueue]).MapKeys()
-	for watchK := range queueWatchKeys {
-		if len(run.Queues[run.ListeningQueue][queueWatchKeys[watchK].String()]) > 0 {
+	for watchK := range run.Queues[run.ListeningQueue] {
+		if len(run.Queues[run.ListeningQueue][watchK]) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-func parseCmdParameters(watchK string, parameters string, eventName string) []string {
+func parseCmdItemParameters(watchK string, parameters string, eventName string) []string {
 	// 2 loops for making sure the parameters placeholders are also replaced
 	for range []int{1, 2} {
 		placeHolders := regexp.MustCompile("{{(.+?)}}").FindAllStringSubmatch(parameters, -1)
@@ -172,7 +232,7 @@ func parseCmdParameters(watchK string, parameters string, eventName string) []st
 				if placeHolders[pIndex][0] == "{{EventName}}" {
 					value = eventName
 				} else {
-					value = getJSONValue(placeHolders[pIndex][1], config.Watch[watchK]).(string)
+					value = config.getWatch(watchK).getParameter(placeHolders[pIndex][1])
 				}
 				parameters = regexp.MustCompile(placeHolders[pIndex][0]).ReplaceAllString(parameters, value)
 			}
@@ -182,27 +242,24 @@ func parseCmdParameters(watchK string, parameters string, eventName string) []st
 	return []string{parameters}
 }
 
-func getCmdAndParameters(watchK string, cmdK int, eventName string) (bool, string, []string) {
-	var isACommandWithEventName bool
+func getCmdItemAndParameters(watchK string, CmdItemK int, eventName string) (bool, string, []string) {
+	var isACommandWithEventName = false
+	var params []string
 
-	var parameters []string
+	CmdList := config.getWatch(watchK).Cmd
 
-	isACommandWithEventName = false
-	Commands := getJSONValue("Cmd", config.Watch[watchK]).([]interface{})
-
-	for i := range Commands[cmdK].([]interface{}) {
-		p := Commands[cmdK].([]interface{})[i].(string)
-		if len(p) > 0 {
-			isACommandWithEventName = isACommandWithEventName || strings.Contains(p, "{{EventName}}")
+	for _, param := range CmdList[CmdItemK] {
+		if len(param) > 0 {
+			isACommandWithEventName = isACommandWithEventName || strings.Contains(param, "{{EventName}}")
 		}
-		parameters = append(parameters, parseCmdParameters(watchK, p, eventName)...)
+		params = append(params, parseCmdItemParameters(watchK, param, eventName)...)
 	}
 
-	if len(parameters) > 1 {
-		return isACommandWithEventName, parameters[0], parameters[1:]
+	if len(params) > 1 {
+		return isACommandWithEventName, params[0], params[1:]
 	}
 
-	return false, parameters[0], []string{}
+	return false, params[0], []string{}
 }
 
 func switchQueues() {
@@ -216,12 +273,9 @@ func switchQueues() {
 }
 
 func updateWatchingDirs(watchK string) {
-	var eventPath string
-	paths := reflect.ValueOf(run.Queues[run.ExecutingQueue][watchK]).MapKeys()
 
-	for i := range paths {
+	for eventPath := range run.Queues[run.ExecutingQueue][watchK] {
 		// 1 CREATE - 2 WRITE - 4 REMOVE - 8 RENAME - 10 CHMOD
-		eventPath = paths[i].String()
 		eventType := string(run.Queues[run.ExecutingQueue][watchK][eventPath])
 
 		if eventType == "REMOVE" || eventType == "RENAME" {
@@ -246,10 +300,10 @@ func updateWatchingDirs(watchK string) {
 }
 
 func executeCommand(command string, args []string) {
-	cmd := exec.Command(command, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
+	CmdItem := exec.Command(command, args...)
+	CmdItem.Stdout = os.Stdout
+	CmdItem.Stderr = os.Stderr
+	CmdItem.Run()
 }
 
 func executeActions() {
@@ -262,18 +316,13 @@ func executeActions() {
 
 	run.InExecution = true
 
-	queueWatchKeys := reflect.ValueOf(run.Queues[run.ExecutingQueue]).MapKeys()
-
-	for i := range queueWatchKeys {
-		watchK := queueWatchKeys[i].String()
-		Commands := getJSONValue("Cmd", config.Watch[watchK]).([]interface{})
-		eventNames := reflect.ValueOf(run.Queues[run.ExecutingQueue][watchK]).MapKeys()
-
-		for cmdK := range Commands {
+	for watchK := range run.Queues[run.ExecutingQueue] {
+		CmdList := config.getWatch(watchK).Cmd
+		for CmdItemK := range CmdList {
 			isACommandWithEventName = false
 			executeOnlyOnceForTheWatch = true
-			for j := range eventNames {
-				isACommandWithEventName, command, parameters = getCmdAndParameters(watchK, cmdK, eventNames[j].String())
+			for eventName := range run.Queues[run.ExecutingQueue][watchK] {
+				isACommandWithEventName, command, parameters = getCmdItemAndParameters(watchK, CmdItemK, eventName)
 
 				if isACommandWithEventName {
 					executeOnlyOnceForTheWatch = false
@@ -299,18 +348,9 @@ func isActiveWatch(watchK string) bool {
 	return reflect.DeepEqual(run.ActiveWatchs, []string{"*"}) || inArray(run.ActiveWatchs, watchK)
 }
 
-func watchDirectories() {
-
-	configWatchKeys := reflect.ValueOf(config.Watch).MapKeys()
-
-	for watchKeysIndex := range configWatchKeys {
-		watchK := configWatchKeys[watchKeysIndex].String()
-
-		if !isActiveWatch(watchK) {
-			continue
-		}
-		SourceDir := getJSONValue("SourceDir", config.Watch[watchK]).(string)
-
+func addListenersToDirectories() {
+	for _, watchK := range run.ActiveWatchs {
+		SourceDir := config.getWatch(watchK).SourceDir
 		fmt.Printf("Watching project: %v\n", watchK)
 		if err := filepath.Walk(
 			SourceDir,
@@ -320,69 +360,11 @@ func watchDirectories() {
 			showErrorAndExit(err.Error())
 		}
 	}
-
-}
-
-func getJSONValue(index string, source interface{}) interface{} {
-
-	for k, v := range source.(map[string]interface{}) {
-		if k == index {
-			return v
-		}
-	}
-
-	return nil
 }
 
 func showErrorAndExit(errorMessage string, args ...interface{}) {
 	fmt.Printf(errorMessage, args...)
 	os.Exit(1)
-}
-
-func validateConfig() {
-	watchKeys := reflect.ValueOf(config.Watch).MapKeys()
-
-	for i := range watchKeys {
-
-		watchDataK := reflect.ValueOf(config.Watch[watchKeys[i].String()]).MapKeys()
-		for j := range watchDataK {
-
-			switch watchDataK[j].String() {
-			case "SourceDir":
-				if reflect.TypeOf(config.Watch[watchKeys[i].String()].(map[string]interface{})["SourceDir"]).String() != "string" {
-					showErrorAndExit("Error: Unexpected config format for Watch(%v:%v) - Expected format: string\n", watchKeys[i], watchDataK[j])
-				}
-				break
-			case "Cmd":
-				if reflect.TypeOf(config.Watch[watchKeys[i].String()].(map[string]interface{})["Cmd"]).String() != "[]interface {}" {
-					showErrorAndExit("Error: Unexpected config format for Watch(%v:%v) - Expected format: []string\n", watchKeys[i], watchDataK[j])
-				}
-				for k := range config.Watch[watchKeys[i].String()].(map[string]interface{})["Cmd"].([]interface{}) {
-					cmd := config.Watch[watchKeys[i].String()].(map[string]interface{})["Cmd"].([]interface{})
-					if len(cmd[k].([]interface{})) == 0 {
-						showErrorAndExit("Error: No action cmd defined for Watch(%v:%v)\n", watchKeys[i].String(), k+1)
-					}
-
-					if len(cmd[k].([]interface{})[0].(string)) == 0 {
-						showErrorAndExit("Error: Action cmd invalid for Watch(%v:%v)\n", watchKeys[i].String(), k+1)
-					}
-				}
-				break
-			}
-		}
-	}
-}
-
-func readConfig(ConfigFile string) {
-	f, err := os.Open(ConfigFile)
-	if err != nil {
-		showErrorAndExit("Error: cannot open config file (%s)\n", ConfigFile)
-	}
-	defer f.Close()
-
-	if json.NewDecoder(f).Decode(&config) != nil {
-		showErrorAndExit("Error: cannot decode JSON file %s\n", ConfigFile)
-	}
 }
 
 func parseParams() {
@@ -398,25 +380,29 @@ func parseParams() {
 
 func initizalize() {
 
-	run.Queues = map[string]map[string]map[string]string{
+	run.Queues = map[string]BufferQueue{
 		"A": {},
 		"B": {},
 	}
 	run.ListeningQueue = "A"
 	run.InExecution = false
-	if len(parValues.Watch) > 0 {
+	if parValues.Watch == "*" {
+		for k := range config.Watch {
+			run.ActiveWatchs = append(run.ActiveWatchs, k)
+		}
+	} else {
 		run.ActiveWatchs = strings.Split(parValues.Watch, ",")
 	}
 
 	var err error
-	run.watcher, err = fsnotify.NewWatcher()
 
+	run.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func listenToEvents() {
+func waitForEvents() {
 	done := make(chan bool)
 
 	go func() {
@@ -442,9 +428,8 @@ func listenToEvents() {
 
 func main() {
 	parseParams()
-	readConfig(parValues.ConfigFile)
-	validateConfig()
+	config = config.New(parValues.ConfigFile)
 	initizalize()
-	watchDirectories()
-	listenToEvents()
+	addListenersToDirectories()
+	waitForEvents()
 }
