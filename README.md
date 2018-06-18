@@ -118,3 +118,12 @@ Windows users might need to setup their Cmd actions starting from **"cmd","/C"**
         ["cmd","/C","echo","This filesystem resource has been modified:","{{EventName}}"]
     ],
 ```
+
+## Known issues
+#### Error "no space left on device"
+In linux systems, the default inotify watchers value is 8192. This value should be increased for watching large directories.
+```
+$ echo fs.inotify.max_user_watches=1000000 | sudo tee -a /etc/sysctl.conf
+$ sudo sysctl -p
+```
+
